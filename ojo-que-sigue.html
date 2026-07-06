@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>El ojo que te sigue</title>
+<style>
+  :root{
+    --bg: #05060a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: radial-gradient(circle at 50% 40%, #14161f 0%, var(--bg) 70%);
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #stage {
+    height: 100%; width: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  svg { width: min(80vmin, 600px); height: min(80vmin, 600px); }
+
+  #status {
+    position: fixed; bottom: 18px; left: 0; right: 0;
+    text-align: center; color: #8b93a7; font-size: 13px;
+    letter-spacing: .02em; pointer-events: none;
+    transition: opacity .4s ease;
+  }
+  #startOverlay {
+    position: fixed; inset: 0; background: rgba(5,6,10,.92);
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 18px; text-align: center; padding: 24px;
+    z-index: 10;
+  }
+  #startOverlay button {
+    background: #eaeaf0; color: #111; border: none; border-radius: 999px;
+    padding: 14px 28px; font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  #startOverlay p { color: #9aa1b5; max-width: 340px; line-height: 1.5; margin: 0; font-size: 14px; }
+  #startOverlay h1 { color: #fff; font-size: 20px; margin: 0; }
+  video { display: none; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <svg viewBox="0 0 400 400">
+    <defs>
+      <radialGradient id="scleraShade" cx="50%" cy="40%" r="70%">
+        <stop offset="0%" stop-color="#ffffff"/>
+        <stop offset="100%" stop-color="#dfe2ea"/>
+      </radialGradient>
+      <radialGradient id="irisGrad" cx="40%" cy="35%" r="65%">
+        <stop offset="0%" stop-color="#8fd3ff"/>
+        <stop offset="55%" stop-color="#3f8fd6"/>
+        <stop offset="100%" stop-color="#1a3a5c"/>
+      </radialGradient>
+    </defs>
+
+    <!-- párpado (clip) -->
+    <clipPath id="eyeClip">
+      <ellipse id="eyeShapeClip" cx="200" cy="200" rx="170" ry="100"/>
+    </clipPath>
+
+    <g clip-path="url(#eyeClip)">
+      <ellipse cx="200" cy="200" rx="170" ry="100" fill="url(#scleraShade)"/>
+      <!-- venitas sutiles -->
+      <path d="M60 200 Q100 180 150 200" stroke="#e8a5a5" stroke-width="1.2" fill="none" opacity="0.4"/>
+      <path d="M340 210 Q300 195 260 210" stroke="#e8a5a5" stroke-width="1.2" fill="none" opacity="0.35"/>
+
+      <g id="iris-group">
+        <circle id="iris" cx="200" cy="200" r="70" fill="url(#irisGrad)"/>
+        <circle id="pupil" cx="200" cy="200" r="32" fill="#05060a"/>
+        <circle id="highlight" cx="182" cy="178" r="12" fill="#ffffff" opacity="0.85"/>
+        <circle id="highlight2" cx="222" cy="222" r="6" fill="#ffffff" opacity="0.4"/>
+      </g>
+    </g>
+
+    <!-- contorno / párpados -->
+    <path id="upperLid" d="M30 200 Q200 70 370 200 Q200 130 30 200 Z" fill="#05060a"/>
+    <path id="lowerLid" d="M30 200 Q200 330 370 200 Q200 270 30 200 Z" fill="#05060a"/>
+    <ellipse cx="200" cy="200" rx="170" ry="100" fill="none" stroke="#000" stroke-width="3" opacity="0.5"/>
+  </svg>
+</div>
+
+<div id="status">Iniciando…</div>
+
+<div id="startOverlay">
+  <h1>👁️ El ojo que te sigue</h1>
+  <p>Esta página usa tu cámara para detectar tu cara y hacer que el ojo te siga en tiempo real. Nada de video se guarda ni se envía a ningún lado: todo corre en tu navegador.</p>
+  <button id="startBtn">Activar cámara</button>
+</div>
+
+<video id="video" autoplay playsinline muted></video>
+
+<script type="module">
+import { FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const statusEl = document.getElementById('status');
+const overlay = document.getElementById('startOverlay');
+const startBtn = document.getElementById('startBtn');
+const video = document.getElementById('video');
+
+const pupil = document.getElementById('pupil');
+const iris = document.getElementById('iris');
+const highlight = document.getElementById('highlight');
+const highlight2 = document.getElementById('highlight2');
+const upperLid = document.getElementById('upperLid');
+const lowerLid = document.getElementById('lowerLid');
+const irisGroup = document.getElementById('iris-group');
+
+// Centro del ojo y límites de movimiento del iris/pupila dentro de la esclerótica
+const EYE_CENTER = { x: 200, y: 200 };
+const MAX_OFFSET_X = 78;
+const MAX_OFFSET_Y = 42;
+
+let target = { x: 0, y: 0 };   // offset objetivo (-1..1 normalizado luego escalado)
+let current = { x: 0, y: 0 };  // offset actual (suavizado)
+let lastSeenAt = 0;
+let faceDetector = null;
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function applyEyePosition(offsetX, offsetY) {
+  const ix = EYE_CENTER.x + offsetX;
+  const iy = EYE_CENTER.y + offsetY;
+  iris.setAttribute('cx', ix);
+  iris.setAttribute('cy', iy);
+  pupil.setAttribute('cx', ix);
+  pupil.setAttribute('cy', iy);
+  highlight.setAttribute('cx', ix - 18);
+  highlight.setAttribute('cy', iy - 22);
+  highlight2.setAttribute('cx', ix + 22);
+  highlight2.setAttribute('cy', iy + 22);
+}
+
+function blink() {
+  irisGroup.style.transition = 'opacity .05s';
+  irisGroup.style.opacity = '0';
+  const closeUpper = 'M30 200 Q200 190 370 200 Q200 210 30 200 Z';
+  const closeLower = 'M30 200 Q200 210 370 200 Q200 190 30 200 Z';
+  const openUpper = upperLid.getAttribute('d');
+  const openLower = lowerLid.getAttribute('d');
+  upperLid.setAttribute('d', closeUpper);
+  lowerLid.setAttribute('d', closeLower);
+  setTimeout(() => {
+    upperLid.setAttribute('d', openUpper);
+    lowerLid.setAttribute('d', openLower);
+    irisGroup.style.opacity = '1';
+  }, 110);
+}
+
+function scheduleBlink() {
+  const delay = 2200 + Math.random() * 3500;
+  setTimeout(() => { blink(); scheduleBlink(); }, delay);
+}
+scheduleBlink();
+
+// Animación idle cuando no hay cara detectada
+let idleAngle = 0;
+function idleLook() {
+  idleAngle += 0.01;
+  target.x = Math.sin(idleAngle) * MAX_OFFSET_X * 0.5;
+  target.y = Math.cos(idleAngle * 0.6) * MAX_OFFSET_Y * 0.3;
+}
+
+async function initDetector() {
+  statusEl.textContent = 'Cargando modelo de detección facial…';
+  const filesetResolver = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  faceDetector = await FaceDetector.createFromOptions(filesetResolver, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO"
+  });
+}
+
+async function initCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+    audio: false
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+function detectLoop() {
+  requestAnimationFrame(detectLoop);
+  if (!faceDetector || video.readyState < 2) return;
+
+  const now = performance.now();
+  const result = faceDetector.detectForVideo(video, now);
+
+  if (result.detections && result.detections.length > 0) {
+    // usamos la cara más grande (más cercana) si hay varias
+    let best = result.detections[0];
+    let bestArea = best.boundingBox.width * best.boundingBox.height;
+    for (const d of result.detections) {
+      const a = d.boundingBox.width * d.boundingBox.height;
+      if (a > bestArea) { best = d; bestArea = a; }
+    }
+    const box = best.boundingBox;
+    const cx = box.originX + box.width / 2;
+    const cy = box.originY + box.height / 2;
+
+    // normalizado 0..1 respecto al frame de video
+    let nx = cx / video.videoWidth;
+    const ny = cy / video.videoHeight;
+
+    // el video del front camera suele mostrarse en espejo visualmente,
+    // pero las coordenadas del stream NO vienen espejadas -> invertimos X
+    // para que el ojo se mueva "hacia donde ves tu cara" de forma natural.
+    nx = 1 - nx;
+
+    const offX = (nx - 0.5) * 2 * MAX_OFFSET_X;
+    const offY = (ny - 0.5) * 2 * MAX_OFFSET_Y;
+
+    target.x = Math.max(-MAX_OFFSET_X, Math.min(MAX_OFFSET_X, offX));
+    target.y = Math.max(-MAX_OFFSET_Y, Math.min(MAX_OFFSET_Y, offY));
+
+    lastSeenAt = now;
+    statusEl.style.opacity = '0';
+  } else {
+    if (now - lastSeenAt > 1200) {
+      idleLook();
+      statusEl.style.opacity = '0.8';
+      statusEl.textContent = 'Buscando una cara…';
+    }
+  }
+
+  current.x = lerp(current.x, target.x, 0.15);
+  current.y = lerp(current.y, target.y, 0.15);
+  applyEyePosition(current.x, current.y);
+}
+
+startBtn.addEventListener('click', async () => {
+  try {
+    startBtn.disabled = true;
+    startBtn.textContent = 'Cargando…';
+    await initCamera();
+    await initDetector();
+    overlay.style.display = 'none';
+    statusEl.textContent = '';
+    detectLoop();
+  } catch (err) {
+    statusEl.style.opacity = '1';
+    statusEl.textContent = 'No se pudo acceder a la cámara: ' + err.message;
+    startBtn.disabled = false;
+    startBtn.textContent = 'Reintentar';
+  }
+});
+</script>
+</body>
+</html>
